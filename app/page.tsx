@@ -109,102 +109,42 @@ export default function Home() {
       // 1. Lọc ra các Group Cha (Level 2 / Parent: 0)
       const parentGroups = headerConfig.filter(cat => cat.Parent === 0);
       
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const finalDocumentData: any[] = [];
-      
       const totalFiles = selectedFiles.length;
-      // Xử lý chunking để UI không bị đơ
-      let filesScanned = 0;
       
       // Chuyển FileList thành mảng để dễ xử lý
-    const fileArray = Array.from(selectedFiles);
+      const allFiles = Array.from(selectedFiles);
 
-      // 2. Lặp qua từng Group Cha để tạo dữ liệu
-      for (let pIndex = 0; pIndex < parentGroups.length; pIndex++) {
-        const parent = parentGroups[pIndex];
-        
-        // Tìm các Group Con của Parent này
-        const children = headerConfig.filter(cat => cat.Parent === parent.Order);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const subGroups: any[] = [];
-         
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const filesInThisGroup: any[] = [];
-        let sttCounter = 1;
-        let lastModuleName = ""; // Dùng để check "gộp ô" trực quan
-
-        // 3. Quét file thuộc Parent này hoặc Child của Parent này
-        for (let i = 0; i < totalFiles; i++) {
-          const file = selectedFiles[i];
-          const filePath = file.webkitRelativePath.toLowerCase();
-
-          let matchedNode = null;
-
-          // Ưu tiên check trùng khớp với Group Con trước (VD: 01.Script)
-          for (const child of children) {
-            const childName = child.Name.toLowerCase();
-            if (filePath.includes(`/${childName}/`) || filePath.includes(`${childName}/`)) {
-              matchedNode = child;
-              break;
-            }
-          }
-
-          // Nếu không thuộc con, check xem có thuộc thẳng thư mục Cha không (VD: 01.DB)
-          if (!matchedNode) {
-            const parentName = parent.Name.toLowerCase();
-            if (filePath.includes(`/${parentName}/`) || filePath.includes(`${parentName}/`)) {
-              matchedNode = parent;
-            }
-          }
-
-          // 4. Nếu file khớp, đưa vào mảng của Nhóm này
-          if (matchedNode) {
-            // Tạo chuỗi tên module, VD: "01.DB \ 01.Script"
-            const fullModuleName = matchedNode.Parent === 0
-              ? matchedNode.Name 
-              : `${parent.Name}\\${matchedNode.Name}`;
-
-            // TRICK GỘP Ô: Nếu module trùng với dòng trước đó, ta in ra chuỗi rỗng
-            let displayModuleName = fullModuleName;
-            if (fullModuleName === lastModuleName) {
-              displayModuleName = ""; 
-            } else {
-              lastModuleName = fullModuleName;
-            }
-
-            filesInThisGroup.push({
-              stt: sttCounter++,
-              moduleName: displayModuleName,
-              fileName: file.name,
-              date: new Date(file.lastModified).toLocaleString('vi-VN', { 
-                day: '2-digit', month: '2-digit', year: 'numeric', 
-                hour: '2-digit', minute: '2-digit' 
-              }),
-              size: Math.round(file.size / 1024).toString(),
-              version: "" // Bỏ trống do giới hạn trình duyệt
-            });
-          }
-
-          // Cập nhật Progress Bar
-          filesScanned++;
-          if (filesScanned % 100 === 0 || filesScanned === totalFiles * parentGroups.length) {
-             // Tính toán % tiến trình (chiếm 70% tổng thời gian)
-             const percent = Math.round((filesScanned / (totalFiles * parentGroups.length)) * 70);
-             setProgress(percent);
-             setStatusText(`Đang xử lý nhóm ${parent.Name}...`);
-             await new Promise(resolve => setTimeout(resolve, 0));
-          }
-        }
-
-        // 5. Nếu nhóm này có chứa file, đẩy vào Data tổng để in ra Word
-        if (filesInThisGroup.length > 0) {
-          finalDocumentData.push({
-            groupOrder: parent.Order,
-            groupName: parent.Name,
-            files: filesInThisGroup
-          });
-        }
-      }//end for
+      // 1. Xây dựng dữ liệu phân cấp 3 tầng: Groups (1, 2) -> SubGroups (1.1, 1.2) -> Files
+    const finalDocumentData = headerConfig
+      .filter(p => p.Parent === 0)
+      .map(parent => ({
+        groupOrder: parent.Order,
+        groupName: parent.Name,
+        subGroups: headerConfig
+          .filter(child => child.Parent === parent.Order)
+          .map(child => {
+            // Lọc file thuộc về sub-group này
+            const files = allFiles
+              .filter(f => f.webkitRelativePath.toLowerCase().includes(`/${child.Name.toLowerCase()}/`))
+              .map((f, idx) => ({
+                stt: idx + 1,
+                // MERGE LOGIC: Chỉ hiện module name ở file đầu tiên
+                moduleName: idx === 0 ? child.Name : "", 
+                fileName: f.name,
+                date: new Date(f.lastModified).toLocaleDateString('vi-VN'),
+                size: Math.round(f.size / 1024).toString(),
+                version: ""
+              }));
+            
+            return {
+              subName: `${child.Order} ${child.Name}`, // 1.1, 1.2...
+              files: files
+            };
+          })
+          .filter(sub => sub.files.length > 0)
+      }))
+      .filter(group => group.subGroups.length > 0);
+      
 
       if (finalDocumentData.length === 0) {
         alert("Không tìm thấy file nào khớp với cấu hình JSON.");
