@@ -13,6 +13,145 @@ interface CategoryModel {
   Level: number;
 }
 
+interface SectionHeader {
+  virtualAddress: number;
+  virtualSize: number;
+  rawDataPointer: number;
+  rawDataSize: number;
+}
+
+const RT_VERSION = 16;
+
+const alignToDword = (value: number) => (value + 3) & ~3;
+
+const readUtf16NullTerminated = (view: DataView, offset: number, limit: number) => {
+  let value = '';
+
+  while (offset + 1 < limit) {
+    const code = view.getUint16(offset, true);
+    offset += 2;
+
+    if (code === 0) break;
+    value += String.fromCharCode(code);
+  }
+
+  return { value, nextOffset: offset };
+};
+
+const getPeFileVersion = async (file: File) => {
+  if (!/\.(dll|exe)$/i.test(file.name)) return '';
+
+  try {
+    const buffer = await file.arrayBuffer();
+    const view = new DataView(buffer);
+
+    if (view.byteLength < 0x40 || view.getUint16(0, true) !== 0x5a4d) return '';
+
+    const peOffset = view.getUint32(0x3c, true);
+    if (peOffset + 24 >= view.byteLength || view.getUint32(peOffset, true) !== 0x00004550) return '';
+
+    const sectionCount = view.getUint16(peOffset + 6, true);
+    const optionalHeaderSize = view.getUint16(peOffset + 20, true);
+    const optionalHeaderOffset = peOffset + 24;
+    const optionalHeaderMagic = view.getUint16(optionalHeaderOffset, true);
+    const dataDirectoryOffset = optionalHeaderOffset + (optionalHeaderMagic === 0x20b ? 112 : 96);
+    if (optionalHeaderMagic !== 0x10b && optionalHeaderMagic !== 0x20b) return '';
+    if (dataDirectoryOffset + 24 > view.byteLength) return '';
+
+    const resourceDirectoryRva = view.getUint32(dataDirectoryOffset + 16, true);
+
+    if (!resourceDirectoryRva) return '';
+
+    const sectionTableOffset = optionalHeaderOffset + optionalHeaderSize;
+    const sections: SectionHeader[] = [];
+
+    for (let i = 0; i < sectionCount; i += 1) {
+      const sectionOffset = sectionTableOffset + i * 40;
+      if (sectionOffset + 40 > view.byteLength) return '';
+
+      sections.push({
+        virtualSize: view.getUint32(sectionOffset + 8, true),
+        virtualAddress: view.getUint32(sectionOffset + 12, true),
+        rawDataSize: view.getUint32(sectionOffset + 16, true),
+        rawDataPointer: view.getUint32(sectionOffset + 20, true),
+      });
+    }
+
+    const rvaToOffset = (rva: number) => {
+      const section = sections.find((item) => {
+        const size = Math.max(item.virtualSize, item.rawDataSize);
+        return rva >= item.virtualAddress && rva < item.virtualAddress + size;
+      });
+
+      return section ? section.rawDataPointer + (rva - section.virtualAddress) : -1;
+    };
+
+    const resourceDirectoryOffset = rvaToOffset(resourceDirectoryRva);
+    if (resourceDirectoryOffset < 0) return '';
+
+    const findResourceEntryOffset = (directoryOffset: number, id?: number): number => {
+      if (directoryOffset < 0 || directoryOffset + 16 > view.byteLength) return -1;
+
+      const namedEntryCount = view.getUint16(directoryOffset + 12, true);
+      const idEntryCount = view.getUint16(directoryOffset + 14, true);
+      const entryCount = namedEntryCount + idEntryCount;
+
+      for (let i = 0; i < entryCount; i += 1) {
+        const entryOffset = directoryOffset + 16 + i * 8;
+        if (entryOffset + 8 > view.byteLength) return -1;
+
+        const nameOrId = view.getUint32(entryOffset, true);
+        const entryId = nameOrId & 0xffff;
+
+        if (id === undefined || entryId === id) return entryOffset;
+      }
+
+      return -1;
+    };
+
+    const getSubdirectoryOffset = (entryOffset: number) => {
+      if (entryOffset < 0) return -1;
+
+      const offsetToData = view.getUint32(entryOffset + 4, true);
+      const isDirectory = (offsetToData & 0x80000000) !== 0;
+
+      return isDirectory ? resourceDirectoryOffset + (offsetToData & 0x7fffffff) : -1;
+    };
+
+    const versionTypeDirectory = getSubdirectoryOffset(findResourceEntryOffset(resourceDirectoryOffset, RT_VERSION));
+    const versionNameDirectory = getSubdirectoryOffset(findResourceEntryOffset(versionTypeDirectory));
+    const versionLanguageEntry = findResourceEntryOffset(versionNameDirectory);
+
+    if (versionLanguageEntry < 0) return '';
+
+    const dataEntryOffset = resourceDirectoryOffset + (view.getUint32(versionLanguageEntry + 4, true) & 0x7fffffff);
+    if (dataEntryOffset + 16 > view.byteLength) return '';
+
+    const versionInfoOffset = rvaToOffset(view.getUint32(dataEntryOffset, true));
+    const versionInfoSize = view.getUint32(dataEntryOffset + 4, true);
+    if (versionInfoOffset < 0 || versionInfoOffset + versionInfoSize > view.byteLength) return '';
+
+    const key = readUtf16NullTerminated(view, versionInfoOffset + 6, versionInfoOffset + versionInfoSize);
+    if (key.value !== 'VS_VERSION_INFO') return '';
+
+    const fixedInfoOffset = versionInfoOffset + alignToDword(key.nextOffset - versionInfoOffset);
+    if (fixedInfoOffset + 52 > versionInfoOffset + versionInfoSize) return '';
+    if (view.getUint32(fixedInfoOffset, true) !== 0xfeef04bd) return '';
+
+    const fileVersionMs = view.getUint32(fixedInfoOffset + 8, true);
+    const fileVersionLs = view.getUint32(fixedInfoOffset + 12, true);
+
+    return [
+      (fileVersionMs >>> 16) & 0xffff,
+      fileVersionMs & 0xffff,
+      (fileVersionLs >>> 16) & 0xffff,
+      fileVersionLs & 0xffff,
+    ].join('.');
+  } catch {
+    return '';
+  }
+};
+
 export default function Home() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [jsonConfig, setJsonConfig] = useState<string>(`[
@@ -107,12 +246,17 @@ export default function Home() {
       const headerConfig: CategoryModel[] = JSON.parse(jsonConfig);
       
       // 1. Lọc ra các Group Cha (Level 2 / Parent: 0)
-      const parentGroups = headerConfig.filter(cat => cat.Parent === 0);
-      
       const totalFiles = selectedFiles.length;
       
       // Chuyển FileList thành mảng để dễ xử lý
       const allFiles = Array.from(selectedFiles);
+      const versionByPath = new Map<string, string>();
+
+      for (const [index, file] of allFiles.entries()) {
+        const version = await getPeFileVersion(file);
+        versionByPath.set(file.webkitRelativePath || file.name, version);
+        setProgress(Math.round(((index + 1) / totalFiles) * 70));
+      }
 
       // 1. Xây dựng dữ liệu phân cấp 3 tầng: Groups (1, 2) -> SubGroups (1.1, 1.2) -> Files
     const finalDocumentData = headerConfig
@@ -133,7 +277,7 @@ export default function Home() {
                 fileName: f.name,
                 date: new Date(f.lastModified).toLocaleDateString('vi-VN'),
                 size: Math.round(f.size / 1024).toString(),
-                version: ""
+                version: versionByPath.get(f.webkitRelativePath || f.name) || ""
               }));
             
             return {
