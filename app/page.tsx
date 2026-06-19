@@ -849,7 +849,7 @@ export default function Home() {
                   <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0, fontWeight: 700 }}>
                     {node.Name}
                   </Typography>
-                  <Chip label={`${node.NumberSubDir} con`} size="small" variant="outlined" />
+                  {node.NumberSubDir > 0 && <Chip label={`${node.NumberSubDir} con`} size="small" variant="outlined" />}
                 </>
               )}
             </Stack>
