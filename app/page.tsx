@@ -35,14 +35,7 @@ import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import PizZip from 'pizzip';
 import Docxtemplater from 'docxtemplater';
 import { saveAs } from 'file-saver';
-
-interface CategoryModel {
-  Order: number | string;
-  Name: string;
-  Parent: number | string;
-  NumberSubDir: number;
-  Level: number;
-}
+import { DEFAULT_HEADER_CONFIG, SAMPLE_HEADER_CONFIGS, type CategoryModel } from './header-samples';
 
 interface HeaderNode extends CategoryModel {
   children: HeaderNode[];
@@ -56,37 +49,6 @@ interface SectionHeader {
 }
 
 const RT_VERSION = 16;
-
-const SAMPLE_HEADER_CONFIG_1: CategoryModel[] = [
-  { Order: 1, Name: 'Client', Parent: 0, NumberSubDir: 3, Level: 2 },
-  { Order: 1.1, Name: 'Counter', Parent: 1, NumberSubDir: 0, Level: 3 },
-  { Order: 1.2, Name: 'Manager', Parent: 1, NumberSubDir: 0, Level: 3 },
-  { Order: 1.3, Name: 'Center', Parent: 1, NumberSubDir: 0, Level: 3 },
-  { Order: 2, Name: 'Core', Parent: 0, NumberSubDir: 3, Level: 2 },
-  { Order: 2.1, Name: 'DB', Parent: 2, NumberSubDir: 0, Level: 3 },
-  { Order: 2.2, Name: 'CAS', Parent: 2, NumberSubDir: 0, Level: 3 },
-  { Order: 2.3, Name: 'Paypost', Parent: 2, NumberSubDir: 0, Level: 3 },
-];
-
-const SAMPLE_HEADER_CONFIG_2: CategoryModel[] = [
-  { Order: 1, Name: 'DB', Parent: 0, NumberSubDir: 2, Level: 2 },
-  { Order: 1.1, Name: 'Script', Parent: 1, NumberSubDir: 0, Level: 3 },
-  { Order: 1.2, Name: 'PKG', Parent: 1, NumberSubDir: 0, Level: 3 },
-  { Order: 2, Name: 'API', Parent: 0, NumberSubDir: 5, Level: 2 },
-  { Order: 2.1, Name: 'Topup.Viettel.Api', Parent: 2, NumberSubDir: 0, Level: 3 },
-  { Order: 2.2, Name: 'Topup.Viettel.Webview', Parent: 2, NumberSubDir: 0, Level: 3 },
-  { Order: 2.3, Name: 'TopupIRIS.CoreAPI', Parent: 2, NumberSubDir: 0, Level: 3 },
-  { Order: 2.4, Name: 'TopupIRIS.Gateway', Parent: 2, NumberSubDir: 0, Level: 3 },
-  { Order: 2.5, Name: 'TopupIRIS.Backend.Site', Parent: 2, NumberSubDir: 0, Level: 3 },
-  { Order: 3, Name: 'TopupIRIS.Inquiry.Service', Parent: 0, NumberSubDir: 0, Level: 2 },
-];
-
-const SAMPLE_HEADER_CONFIGS = [
-  { id: 'sample-1', name: 'Sample PAYPOST', config: SAMPLE_HEADER_CONFIG_1 },
-  { id: 'sample-2', name: 'Sample TOPUP', config: SAMPLE_HEADER_CONFIG_2 },
-];
-
-const DEFAULT_HEADER_CONFIG = SAMPLE_HEADER_CONFIG_2;
 
 const alignToDword = (value: number) => (value + 3) & ~3;
 
@@ -164,6 +126,105 @@ const getDescendantOrders = (config: CategoryModel[], parentOrder: number | stri
 
   collect(parentOrder);
   return descendants;
+};
+
+const isCategoryModel = (value: unknown): value is CategoryModel => {
+  if (!value || typeof value !== 'object') return false;
+
+  const item = value as Partial<CategoryModel>;
+  return (
+    (typeof item.Order === 'number' || typeof item.Order === 'string') &&
+    typeof item.Name === 'string' &&
+    item.Name.trim().length > 0 &&
+    (typeof item.Parent === 'number' || typeof item.Parent === 'string') &&
+    typeof item.NumberSubDir === 'number' &&
+    Number.isInteger(item.NumberSubDir) &&
+    item.NumberSubDir >= 0 &&
+    typeof item.Level === 'number' &&
+    Number.isInteger(item.Level)
+  );
+};
+
+const validateHeaderConfig = (value: unknown) => {
+  const errors: string[] = [];
+
+  if (!Array.isArray(value)) {
+    return { config: [] as CategoryModel[], errors: ['File JSON phải là một mảng header.'] };
+  }
+
+  value.forEach((item, index) => {
+    if (!item || typeof item !== 'object') {
+      errors.push(`Dòng ${index + 1}: header phải là object.`);
+      return;
+    }
+
+    const header = item as Partial<CategoryModel>;
+    const missingFields = ['Order', 'Name', 'Parent', 'NumberSubDir', 'Level'].filter(
+      (field) => !(field in header),
+    );
+
+    if (missingFields.length > 0) {
+      errors.push(`Dòng ${index + 1}: thiếu trường ${missingFields.join(', ')}.`);
+    }
+
+    if (!isCategoryModel(item)) {
+      errors.push(
+        `Dòng ${index + 1}: kiểu dữ liệu không hợp lệ. Order/Parent là number hoặc string, Name là chuỗi, NumberSubDir và Level là số nguyên.`,
+      );
+    }
+  });
+
+  if (errors.length > 0) return { config: [] as CategoryModel[], errors };
+
+  const config = value as CategoryModel[];
+  const seenOrders = new Set<string>();
+  const orderSet = new Set(config.map((item) => headerId(item.Order)));
+
+  config.forEach((header) => {
+    const order = headerId(header.Order);
+
+    if (seenOrders.has(order)) {
+      errors.push(`Header Order "${header.Order}" bị trùng.`);
+    }
+    seenOrders.add(order);
+
+    if (!sameHeader(header.Parent, 0) && !orderSet.has(headerId(header.Parent))) {
+      errors.push(`Header "${header.Name}" (Order ${header.Order}) có Parent "${header.Parent}" không tồn tại.`);
+    }
+  });
+
+  config.forEach((header) => {
+    const actualChildCount = config.filter((item) => sameHeader(item.Parent, header.Order)).length;
+    if (header.NumberSubDir !== actualChildCount) {
+      errors.push(
+        `Header "${header.Name}" (Order ${header.Order}) có NumberSubDir=${header.NumberSubDir}, nhưng thực tế có ${actualChildCount} header con.`,
+      );
+    }
+
+    if (sameHeader(header.Parent, 0) && header.Level !== 2) {
+      errors.push(`Header gốc "${header.Name}" (Order ${header.Order}) phải có Level=2.`);
+    }
+
+    if (!sameHeader(header.Parent, 0)) {
+      const parent = config.find((item) => sameHeader(item.Order, header.Parent));
+      if (parent && header.Level !== parent.Level + 1) {
+        errors.push(
+          `Header "${header.Name}" (Order ${header.Order}) phải có Level=${parent.Level + 1} theo header cha "${parent.Name}".`,
+        );
+      }
+    }
+  });
+
+  return { config, errors };
+};
+
+const validateHeadersInSource = (config: CategoryModel[], sourceFolders: string[]) => {
+  const folderSet = new Set(sourceFolders.map((item) => item.toLowerCase()));
+  const missingHeaders = config.filter((header) => !folderSet.has(header.Name.toLowerCase()));
+
+  return missingHeaders.map(
+    (header) => `Không tìm thấy folder cho header "${header.Name}" (Order ${header.Order}, Level ${header.Level}).`,
+  );
 };
 
 const decodeXmlEntities = (value: string) =>
@@ -324,7 +385,7 @@ export default function Home() {
   const configFileInputRef = useRef<HTMLInputElement>(null);
   const templateFileInputRef = useRef<HTMLInputElement>(null);
   const [headerConfig, setHeaderConfig] = useState<CategoryModel[]>(() => normalizeHeaderConfig(DEFAULT_HEADER_CONFIG));
-  const [activeSampleId, setActiveSampleId] = useState<string>('sample-2');
+  const [activeSampleId, setActiveSampleId] = useState<string>('sample-topup');
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [sourceFolder, setSourceFolder] = useState<string>('');
   const [sourceFolderError, setSourceFolderError] = useState<string>('');
@@ -341,6 +402,7 @@ export default function Home() {
   const [progress, setProgress] = useState<number>(0);
   const [statusText, setStatusText] = useState<string>('');
   const [toastText, setToastText] = useState<string>('');
+  const [validationModalTitle, setValidationModalTitle] = useState<string>('Biểu mẫu không hợp lệ');
   const [templateModalMessage, setTemplateModalMessage] = useState<string>('');
 
   const headerTree = useMemo(() => buildHeaderTree(headerConfig), [headerConfig]);
@@ -413,6 +475,11 @@ export default function Home() {
   };
 
   const handleSampleChange = (sampleId: string) => {
+    if (!sampleId) {
+      setActiveSampleId('');
+      return;
+    }
+
     const sample = SAMPLE_HEADER_CONFIGS.find((item) => item.id === sampleId);
     if (!sample) return;
 
@@ -436,6 +503,7 @@ export default function Home() {
   const handleDownloadDefaultTemplate = async () => {
     const response = await fetch('/Template.docx');
     if (!response.ok) {
+      setValidationModalTitle('Biểu mẫu không hợp lệ');
       setTemplateModalMessage('Không tìm thấy Template.docx mặc định trong thư mục public.');
       return;
     }
@@ -466,6 +534,7 @@ export default function Home() {
 
       if (compareMessage) {
         setSelectedTemplateFile(null);
+        setValidationModalTitle('Biểu mẫu không hợp lệ');
         setTemplateModalMessage(compareMessage);
         return;
       }
@@ -476,6 +545,7 @@ export default function Home() {
     } catch (error) {
       setSelectedTemplateFile(null);
       setSelectedTemplatePath('');
+      setValidationModalTitle('Biểu mẫu không hợp lệ');
       setTemplateModalMessage((error as Error).message || 'Không đọc được file biểu mẫu.');
     } finally {
       if (templateFileInputRef.current) templateFileInputRef.current.value = '';
@@ -577,13 +647,20 @@ export default function Home() {
 
     try {
       const parsedConfig = JSON.parse(await configFile.text());
-      if (!Array.isArray(parsedConfig)) throw new Error('Invalid config');
+      const validationResult = validateHeaderConfig(parsedConfig);
 
-      setHeaderConfig(normalizeHeaderConfig(parsedConfig as CategoryModel[]));
+      if (validationResult.errors.length > 0) {
+        setValidationModalTitle('Cấu hình Header không hợp lệ');
+        setTemplateModalMessage(validationResult.errors.join('\n'));
+        return;
+      }
+
+      setHeaderConfig(validationResult.config);
       setActiveSampleId('');
       setToastText('Đã tải cấu hình Header từ file.');
     } catch {
-      setToastText('File cấu hình Header không hợp lệ.');
+      setValidationModalTitle('Cấu hình Header không hợp lệ');
+      setTemplateModalMessage('File không phải JSON hợp lệ hoặc không đọc được nội dung.');
     } finally {
       if (configFileInputRef.current) configFileInputRef.current.value = '';
     }
@@ -592,6 +669,13 @@ export default function Home() {
   const handleGenerateDoc = async () => {
     if (!sourceFolder || selectedFiles.length === 0) {
       setSourceFolderError('Vui lòng chọn thư mục nguồn trước khi xuất Word.');
+      return;
+    }
+
+    const missingSourceHeaderErrors = validateHeadersInSource(headerConfig, folderOptions);
+    if (missingSourceHeaderErrors.length > 0) {
+      setValidationModalTitle('Thư mục nguồn chưa khớp Cấu hình Header');
+      setTemplateModalMessage(missingSourceHeaderErrors.join('\n'));
       return;
     }
 
@@ -1078,9 +1162,7 @@ export default function Home() {
                 disabled={isProcessing}
                 sx={{ minWidth: 190 }}
               >
-                <MenuItem value="" sx={{ display: 'none' }}>
-                  Tùy chỉnh
-                </MenuItem>
+                <MenuItem value="">Tùy chỉnh</MenuItem>
                 {SAMPLE_HEADER_CONFIGS.map((sample) => (
                   <MenuItem key={sample.id} value={sample.id}>
                     {sample.name}
@@ -1254,8 +1336,8 @@ export default function Home() {
                   <WarningAmberIcon fontSize="small" />
                 </div>
                 <div className="min-w-0 pt-0.5">
-                  <h3 className="text-base font-bold text-slate-950">Biểu mẫu không hợp lệ</h3>
-                  <p className="mt-1 text-sm leading-6 text-slate-600">{templateModalMessage}</p>
+                  <h3 className="text-base font-bold text-slate-950">{validationModalTitle}</h3>
+                  <p className="mt-1 whitespace-pre-line text-sm leading-6 text-slate-600">{templateModalMessage}</p>
                 </div>
               </div>
               <div className="flex justify-end border-t border-slate-100 px-5 py-3">
