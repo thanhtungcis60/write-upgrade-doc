@@ -1010,7 +1010,7 @@ export default function Home() {
                     ) : null,
                   },
                 }}
-                placeholder="Chưa chọn thư mục nguồn"
+                placeholder="Chọn thư mục nguồn để thêm mới/chỉnh sửa Cấu hình header"
                 size="small"
                 error={Boolean(sourceFolderError)}
               />
@@ -1085,7 +1085,7 @@ export default function Home() {
                   },
                 }}
                 title={selectedTemplatePath}
-                placeholder="Chưa tải biểu mẫu"
+                placeholder="Chọn biểu mẫu"
                 size="small"
               />
               <Button
